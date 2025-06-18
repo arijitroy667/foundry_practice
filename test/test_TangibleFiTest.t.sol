@@ -269,7 +269,7 @@ contract DiamondE2ETest is Test {
         // First 3 payments: User has sufficient funds in wallet
         for (uint i = 0; i < 3; i++) {
             // Jump ahead 30 days
-            vm.warp(block.timestamp + 3888000);
+            vm.warp(block.timestamp + 20000000);
 
             // Ensure user has enough balance
             assertGe(
@@ -315,7 +315,7 @@ contract DiamondE2ETest is Test {
         }
 
         // Next payment: User doesn't have sufficient funds, should use buffer
-        vm.warp(block.timestamp + 3888000);
+        vm.warp(block.timestamp + 20000000);
 
         // Reduce user's USDC balance to simulate insufficient funds
         vm.startPrank(user1);
@@ -375,7 +375,7 @@ contract DiamondE2ETest is Test {
         // Finish the remaining payments using buffer
         for (uint i = 4; i < 6; i++) {
             // Jump ahead 30 days
-            vm.warp(block.timestamp + 3888000);
+            vm.warp(block.timestamp + 20000000);
 
             // Simulate Chainlink Automation - fixed variable names to avoid shadowing
             (bool upkeepNeeded2, bytes memory performData2) = AutomationLoan(
@@ -543,7 +543,7 @@ contract DiamondE2ETest is Test {
 
         for (uint i = 0; i < 6; i++) {
             // Jump ahead 30 days
-            vm.warp(block.timestamp + 3888000);
+            vm.warp(block.timestamp + 20000000);
 
             // For cross-chain loans, we'll send 3 EMI payments via CCIP and 3 via Automation
             if (i < 3) {
