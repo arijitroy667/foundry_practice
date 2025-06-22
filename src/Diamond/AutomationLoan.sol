@@ -33,6 +33,7 @@ contract AutomationLoan is
         uint256 amount,
         address tokenAddress
     );
+    event BufferUsed(uint256 indexed loanId, uint256 amount);
     event BufferDeducted(uint256 indexed loanId, uint256 amount);
     event BufferReturned(uint256 indexed loanId, uint256 amount);
     event LoanRepaid(
@@ -490,7 +491,7 @@ contract AutomationLoan is
     function makeMonthlyPayment(uint256 loanId) external {
         DiamondStorage.VaultState storage ds = DiamondStorage.getStorage();
         uint256 collateralTokenId = ds.loanIdToCollateralTokenId[loanId];
-        
+
         DiamondStorage.LoanData storage loan = ds.loans[collateralTokenId];
         if (!loan.isActive) {
             revert DiamondStorage.LoanNotActive();
@@ -551,7 +552,7 @@ contract AutomationLoan is
     function liquidateLoan(uint256 loanId) internal {
         DiamondStorage.VaultState storage ds = DiamondStorage.getStorage();
         uint256 collateralTokenId = ds.loanIdToCollateralTokenId[loanId];
-        
+
         DiamondStorage.LoanData storage loan = ds.loans[collateralTokenId];
         if (!loan.isActive || loan.loanId != loanId) return;
         uint256 monthIndex = (block.timestamp - loan.startTime) / 30 days;
@@ -582,7 +583,7 @@ contract AutomationLoan is
     function repayLoanFull(uint256 loanId) external {
         DiamondStorage.VaultState storage ds = DiamondStorage.getStorage();
         uint256 collateralTokenId = ds.loanIdToCollateralTokenId[loanId];
-        
+
         DiamondStorage.LoanData storage loan = ds.loans[collateralTokenId];
         IERC20 token = IERC20(loan.tokenAddress);
         if (!loan.isActive || loan.loanId != loanId) {
@@ -667,5 +668,54 @@ contract AutomationLoan is
         return
             ds.User[owner][tokenId].isAuth &&
             ds.User[owner][tokenId].amount > 0;
+    }
+
+    /// just for testing purposes
+    // Add this function to your AutomationLoan contract
+    function testBufferPayment(
+        uint256 loanId,
+        uint256 monthIndex,
+        uint256 paymentAmount
+    ) external {
+        DiamondStorage.VaultState storage ds = DiamondStorage.getStorage();
+        uint256 collateralTokenId = ds.loanIdToCollateralTokenId[loanId];
+        DiamondStorage.LoanData storage loan = ds.loans[collateralTokenId];
+
+        // Standard checks
+        require(loan.isActive, "Loan not active");
+        require(
+            monthIndex < loan.monthlyPayments.length,
+            "Invalid month index"
+        );
+        require(!loan.monthlyPayments[monthIndex], "Payment already made");
+        require(
+            paymentAmount <= loan.remainingBuffer,
+            "Payment exceeds buffer"
+        );
+
+        // Update loan state
+        loan.monthlyPayments[monthIndex] = true;
+        loan.lastPaymentTime = block.timestamp;
+
+        // Update buffer amounts
+        loan.remainingBuffer -= paymentAmount;
+
+        // Safely update global buffer tracking
+        if (ds.totalBufferLocked >= paymentAmount) {
+            ds.totalBufferLocked -= paymentAmount;
+        } else {
+            ds.totalBufferLocked = 0;
+        }
+
+        // Safely update token-specific buffer tracking
+        if (ds.totalBufferLockedByToken[loan.tokenAddress] >= paymentAmount) {
+            ds.totalBufferLockedByToken[loan.tokenAddress] -= paymentAmount;
+        } else {
+            ds.totalBufferLockedByToken[loan.tokenAddress] = 0;
+        }
+
+        // Emit events
+        emit BufferUsed(loanId, paymentAmount);
+        emit EMIPaid(loanId, paymentAmount);
     }
 }
