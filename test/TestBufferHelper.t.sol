@@ -15,7 +15,7 @@ contract TestBufferHelper {
         address diamond,
         uint256 loanId,
         uint256 monthIndex
-    ) external {
+    ) external returns (bool paymentFullyCovered) {
         console.log("Attempting buffer payment for loan ID:", loanId);
         console.log("Month index:", monthIndex);
 
@@ -39,13 +39,15 @@ contract TestBufferHelper {
         uint256 monthlyAmount = loanData.totalDebt /
             loanData.monthlyPayments.length;
 
-        // Determine how much we can deduct from buffer - don't exceed remaining buffer
+        // Determine how much we can deduct from buffer
         uint256 actualPayment;
         if (loanData.remainingBuffer >= monthlyAmount) {
             actualPayment = monthlyAmount;
+            paymentFullyCovered = true;
         } else {
             // If buffer is less than monthly amount, use whatever is left
             actualPayment = loanData.remainingBuffer;
+            paymentFullyCovered = false;
             console.log("WARNING: Buffer is less than monthly payment");
             console.log("Using remaining buffer:", actualPayment);
         }
@@ -53,10 +55,10 @@ contract TestBufferHelper {
         // Don't attempt to make payment if buffer is zero
         if (actualPayment == 0) {
             console.log("ERROR: Buffer is depleted, cannot make payment");
-            return;
+            return false;
         }
 
-        // Call diamond contract to create a function selector that performs the payment
+        // Call diamond contract to make the buffer payment
         bytes memory callData = abi.encodeWithSignature(
             "testBufferPayment(uint256,uint256,uint256)",
             loanId,
@@ -66,20 +68,23 @@ contract TestBufferHelper {
 
         (bool success, ) = diamond.call(callData);
 
-        // If the function doesn't exist, we need to add it to the Diamond
+        // If the function doesn't exist, handle the fallback
         if (!success) {
-            console.log(
-                "[Warning] Failed to call testBufferPayment function - add it to the Diamond contract!"
-            );
-            console.log("Using fallback approach for tests only");
-
-            // Emit events from this contract for test verification
-            emit EMIPaid(loanId, actualPayment);
-            emit BufferUsed(loanId, actualPayment);
+            console.log("Failed to call testBufferPayment function");
         }
 
-        // For test purposes, verify the payment was made
+        // Get updated loan data
         loanData = ViewFacetContract(diamond).getLoanById(loanId);
-        console.log("Payment applied. New buffer:", loanData.remainingBuffer);
+        if (!loanData.isActive) {
+            console.log("ALERT: Loan liquidated due to insufficient buffer");
+            paymentFullyCovered = false;
+        } else {
+            console.log(
+                "Payment processed. New buffer:",
+                loanData.remainingBuffer
+            );
+        }
+
+        return paymentFullyCovered;
     }
 }

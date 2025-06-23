@@ -693,29 +693,47 @@ contract AutomationLoan is
             "Payment exceeds buffer"
         );
 
-        // Update loan state
-        loan.monthlyPayments[monthIndex] = true;
-        loan.lastPaymentTime = block.timestamp;
+        // Calculate monthly payment amount
+        uint256 monthlyAmount = loan.totalDebt / loan.monthlyPayments.length;
 
-        // Update buffer amounts
-        loan.remainingBuffer -= paymentAmount;
+        // Check if buffer payment fully covers the monthly amount
+        if (paymentAmount >= monthlyAmount) {
+            // If buffer covers the full payment, mark it as paid
+            loan.monthlyPayments[monthIndex] = true;
+            loan.lastPaymentTime = block.timestamp;
 
-        // Safely update global buffer tracking
-        if (ds.totalBufferLocked >= paymentAmount) {
+            // Deduct from buffer
+            loan.remainingBuffer -= paymentAmount;
+
+            // Update global buffer tracking
             ds.totalBufferLocked -= paymentAmount;
-        } else {
-            ds.totalBufferLocked = 0;
-        }
-
-        // Safely update token-specific buffer tracking
-        if (ds.totalBufferLockedByToken[loan.tokenAddress] >= paymentAmount) {
             ds.totalBufferLockedByToken[loan.tokenAddress] -= paymentAmount;
-        } else {
-            ds.totalBufferLockedByToken[loan.tokenAddress] = 0;
-        }
 
-        // Emit events
-        emit BufferUsed(loanId, paymentAmount);
-        emit EMIPaid(loanId, paymentAmount);
+            // Emit events
+            emit BufferUsed(loanId, paymentAmount);
+            emit EMIPaid(loanId, paymentAmount);
+        } else {
+            // If buffer doesn't cover full payment, use what's available
+            // but don't mark payment as complete - instead, liquidate
+            uint256 bufferToUse = loan.remainingBuffer; // Use all remaining buffer
+
+            // Reset buffer to zero
+            loan.remainingBuffer = 0;
+
+            // Update global buffer tracking
+            ds.totalBufferLocked -= bufferToUse;
+            ds.totalBufferLockedByToken[loan.tokenAddress] -= bufferToUse;
+
+            // Emit event for the buffer usage
+            emit BufferUsed(loanId, bufferToUse);
+
+            // Liquidate the loan
+            loan.isActive = false;
+            delete ds.loanIdToCollateralTokenId[loanId];
+            if (ds.totalActiveLoans > 0) ds.totalActiveLoans--;
+            ds.totalERC20Locked -= loan.loanAmount;
+
+            emit LoanLiquidated(loanId, loan.borrower);
+        }
     }
 }
