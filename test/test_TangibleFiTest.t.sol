@@ -581,47 +581,45 @@ contract DiamondE2ETest is Test {
         (uint256 totalDebt, uint256 bufferAmount) = viewFacet(address(diamond))
             .calculateLoanTerms(loanAmount, loanDuration);
 
-        // Double buffer for cross-chain loans
-        uint256 doubleBuffer = bufferAmount * 2;
+        // --- START OF CORRECTED SECTION ---
+
+        // Use a unique variable name to avoid compiler errors.
+        uint256 monthlyPaymentForCrossChain = totalDebt / (loanDuration / 30 days);
+        // For the test, we need a buffer that can cover the 3 automated payments.
+        uint256 requiredBufferForTest = monthlyPaymentForCrossChain * 3;
 
         console.log("Cross-chain loan amount:", loanAmount / 10 ** 6, "USDC");
-        console.log("Buffer required:", doubleBuffer / 10 ** 6, "USDC");
+        console.log("Minimum buffer required (total interest):", bufferAmount / 10 ** 6, "USDC");
+        console.log("Buffer being sent for test (3 payments):", requiredBufferForTest / 10 ** 6, "USDC");
 
         // Approve NFT transfer for loan creation
         AuthUser(address(diamond)).approve(address(diamond), tokenId);
 
-        // Create a loan request for cross-chain scenario
-        // We'll use Mumbai as the source chain and user2's address as source address
+        // Create a loan request for cross-chain scenario. The event correctly emits the minimum required buffer.
         vm.expectEmit(true, true, false, false);
-        emit LoanRequested(1, user1, doubleBuffer, MUMBAI_CHAIN_SELECTOR);
+        emit LoanRequested(1, user1, bufferAmount, MUMBAI_CHAIN_SELECTOR);
 
         AutomationLoan(address(diamond)).createLoan(
-            tokenId, // NFT token ID
-            tokenId, // Account token ID
+            tokenId,
+            tokenId,
             loanDuration,
             loanAmount,
             address(mockUSDC),
-            MUMBAI_CHAIN_SELECTOR, // Mumbai chain selector
-            user2 // User2's address on Mumbai
+            MUMBAI_CHAIN_SELECTOR,
+            user2
         );
 
         vm.stopPrank();
 
-        // Step 3: Simulate CCIP message with buffer payment from Mumbai
-        bytes memory ccipMessage = abi.encode(
-            uint256(1), // Loan ID
-            PaymentType.Buffer // Payment type
-        );
+        // Step 3: Simulate CCIP message with a buffer large enough for the test
+        bytes memory ccipMessage = abi.encode(uint256(1), PaymentType.Buffer);
 
-        // Create token transfer data
-        Client.EVMTokenAmount[]
-            memory tokenAmounts = new Client.EVMTokenAmount[](1);
+        Client.EVMTokenAmount[] memory tokenAmounts = new Client.EVMTokenAmount[](1);
         tokenAmounts[0] = Client.EVMTokenAmount({
             token: address(mockUSDC),
-            amount: bufferAmount
+            amount: requiredBufferForTest // Send the larger buffer
         });
 
-        // Create CCIP message
         Client.Any2EVMMessage memory message = Client.Any2EVMMessage({
             messageId: bytes32(uint256(1)),
             sourceChainSelector: MUMBAI_CHAIN_SELECTOR,
@@ -630,43 +628,35 @@ contract DiamondE2ETest is Test {
             destTokenAmounts: tokenAmounts
         });
 
-        // Mint USDC to the router for the transfer
-        mockUSDC.mint(address(mockRouter), bufferAmount);
+        // Mint the correct, larger amount to the router.
+        mockUSDC.mint(address(mockRouter), requiredBufferForTest);
 
         // Simulate CCIP message delivery
         vm.startPrank(address(mockRouter));
         vm.expectEmit(true, false, false, false);
         emit LoanActivated(1);
-
         CrossChainFacet(address(diamond)).ccipReceive(message);
         vm.stopPrank();
 
         // Step 4: Verify loan was activated after buffer payment
         uint256 loanId = viewFacet(address(diamond)).getUserLoans(user1)[0];
-
-        DiamondStorage.LoanData memory loanData = viewFacet(address(diamond))
-            .getLoanById(loanId);
+        DiamondStorage.LoanData memory loanData = viewFacet(address(diamond)).getLoanById(loanId);
         uint256 startTime = loanData.startTime;
 
-        assertTrue(
-            loanData.isActive,
-            "Loan should be active after buffer payment"
-        );
+        assertTrue(loanData.isActive, "Loan should be active after buffer payment");
+        // Verify the correct, larger buffer was stored.
         assertEq(
             loanData.remainingBuffer,
-            bufferAmount,
+            requiredBufferForTest,
             "Buffer amount should be stored"
         );
 
-        // Step 5: Simulate time passing and EMI payments via CCIP for the first 3 months
-        uint256 monthlyPayment = totalDebt / (loanDuration / 30 days);
+        // --- END OF CORRECTED SECTION ---
 
+        // Step 5: Simulate time passing and EMI payments via CCIP for the first 3 months
         // First 3 months via CCIP
         for (uint i = 0; i < 3; i++) {
-            // Each payment has its own month index
             uint256 currentMonthIndex = i;
-
-            // Advance time to after this month's payment is due
             vm.warp(
                 startTime +
                     ((currentMonthIndex + 1) * 30 days) +
@@ -674,11 +664,9 @@ contract DiamondE2ETest is Test {
                     1 hours
             );
 
-            // Debug the payment conditions
             DiamondStorage.LoanData memory loan = viewFacet(address(diamond))
                 .getLoanById(loanId);
-            uint256 calculatedMonthIndex = (block.timestamp - loan.startTime) /
-                30 days;
+            uint256 calculatedMonthIndex = (block.timestamp - loan.startTime) / 30 days;
             console.log("-------- CCIP Payment", i + 1, "--------");
             console.log("Current timestamp:", block.timestamp);
             console.log("Loan start time:", loan.startTime);
@@ -695,34 +683,24 @@ contract DiamondE2ETest is Test {
                     loan.startTime + (calculatedMonthIndex * 30 days) + 1 days
             );
 
-            // Simulate EMI payment via CCIP
-            bytes memory emiMessage = abi.encode(
-                uint256(1), // Loan ID
-                PaymentType.EMI // Payment type
-            );
+            bytes memory emiMessage = abi.encode(uint256(1), PaymentType.EMI);
 
-            // Create token transfer data
-            Client.EVMTokenAmount[]
-                memory emiTokenAmounts = new Client.EVMTokenAmount[](1);
+            Client.EVMTokenAmount[] memory emiTokenAmounts = new Client.EVMTokenAmount[](1);
             emiTokenAmounts[0] = Client.EVMTokenAmount({
                 token: address(mockUSDC),
-                amount: monthlyPayment
+                amount: monthlyPaymentForCrossChain // USE CORRECT VARIABLE
             });
 
-            // Create CCIP message with unique message ID
-            Client.Any2EVMMessage memory emiCcipMessage = Client
-                .Any2EVMMessage({
-                    messageId: bytes32(uint256(i + 100)),
-                    sourceChainSelector: MUMBAI_CHAIN_SELECTOR,
-                    sender: abi.encode(user2),
-                    data: emiMessage,
-                    destTokenAmounts: emiTokenAmounts
-                });
+            Client.Any2EVMMessage memory emiCcipMessage = Client.Any2EVMMessage({
+                messageId: bytes32(uint256(i + 100)),
+                sourceChainSelector: MUMBAI_CHAIN_SELECTOR,
+                sender: abi.encode(user2),
+                data: emiMessage,
+                destTokenAmounts: emiTokenAmounts
+            });
 
-            // Mint USDC to the router for the transfer
-            mockUSDC.mint(address(mockRouter), monthlyPayment);
+            mockUSDC.mint(address(mockRouter), monthlyPaymentForCrossChain); // USE CORRECT VARIABLE
 
-            // Simulate CCIP message delivery
             vm.startPrank(address(mockRouter));
             CrossChainFacet(address(diamond)).ccipReceive(emiCcipMessage);
             vm.stopPrank();
@@ -730,16 +708,13 @@ contract DiamondE2ETest is Test {
             console.log(
                 "Cross-chain month %s payment (via CCIP): %s USDC",
                 i + 1,
-                monthlyPayment / 10 ** 6
+                monthlyPaymentForCrossChain / 10 ** 6 // USE CORRECT VARIABLE
             );
         }
 
         // Next 3 payments using Automation to draw from the buffer
         for (uint i = 0; i < 3; i++) {
-            // Continue with subsequent months (3, 4, 5)
             uint256 currentMonthIndex = i + 3;
-
-            // Advance to next month + grace period
             vm.warp(
                 startTime +
                     ((currentMonthIndex + 1) * 30 days) +
@@ -747,16 +722,9 @@ contract DiamondE2ETest is Test {
                     1 hours
             );
 
-            // Debug data
-            DiamondStorage.LoanData memory loan = viewFacet(address(diamond))
-                .getLoanById(loanId);
-            uint256 calculatedMonthIndex = (block.timestamp - loan.startTime) /
-                30 days;
-            console.log(
-                "-------- Automation Payment",
-                currentMonthIndex + 1,
-                "--------"
-            );
+            DiamondStorage.LoanData memory loan = viewFacet(address(diamond)).getLoanById(loanId);
+            uint256 calculatedMonthIndex = (block.timestamp - loan.startTime) / 30 days;
+            console.log("-------- Automation Payment", currentMonthIndex + 1, "--------");
             console.log("Current timestamp:", block.timestamp);
             console.log("Loan start time:", loan.startTime);
             console.log("Calculated month index:", calculatedMonthIndex);
@@ -776,35 +744,27 @@ contract DiamondE2ETest is Test {
                     loan.startTime + (calculatedMonthIndex * 30 days) + 1 days
             );
 
-            // Mock the getOverdueLoanIds response
             mockGetOverdueLoanIds(loanId);
 
-            // Check if upkeep is needed
-            (bool upkeepNeeded, bytes memory performData) = AutomationLoan(
-                address(diamond)
-            ).checkUpkeep("");
+            (bool upkeepNeeded, bytes memory performData) = AutomationLoan(address(diamond)).checkUpkeep("");
             assertTrue(upkeepNeeded, "Upkeep should be needed for EMI payment");
 
-            // Record pre-buffer amount
             loanData = viewFacet(address(diamond)).getLoanById(loanId);
             uint256 preBuffer = loanData.remainingBuffer;
 
-            // Make buffer payment to the current month index
-            safeBufferPayment(loanId, currentMonthIndex);
+            // Call performUpkeep to simulate automation
+            AutomationLoan(address(diamond)).performUpkeep(performData);
 
-            // Verify buffer was used correctly
             loanData = viewFacet(address(diamond)).getLoanById(loanId);
 
-            // Only verify buffer reduction if we actually made a payment
             if (!loan.monthlyPayments[currentMonthIndex] && preBuffer > 0) {
-                if (preBuffer >= monthlyPayment) {
+                if (preBuffer >= monthlyPaymentForCrossChain) { // USE CORRECT VARIABLE
                     assertEq(
                         loanData.remainingBuffer,
-                        preBuffer - monthlyPayment,
+                        preBuffer - monthlyPaymentForCrossChain, // USE CORRECT VARIABLE
                         "Buffer should be reduced by payment amount"
                     );
                 } else {
-                    // If buffer was less than monthly payment, it should be fully depleted
                     assertEq(
                         loanData.remainingBuffer,
                         0,
@@ -816,14 +776,13 @@ contract DiamondE2ETest is Test {
             console.log(
                 "Cross-chain month %s payment (via Automation): %s USDC",
                 currentMonthIndex + 1,
-                monthlyPayment / 10 ** 6
+                monthlyPaymentForCrossChain / 10 ** 6 // USE CORRECT VARIABLE
             );
         }
 
         // Step 6: Close the loan and refund any remaining buffer
         vm.startPrank(user1);
 
-        // Get remaining buffer
         loanData = viewFacet(address(diamond)).getLoanById(loanId);
         uint256 remainingBuffer = loanData.remainingBuffer;
         console.log(
@@ -831,23 +790,27 @@ contract DiamondE2ETest is Test {
             remainingBuffer / 10 ** 6
         );
 
-        // Close the loan via cross-chain message
-        bytes memory repayData = abi.encode(
-            uint256(1), // Loan ID
-            PaymentType.FullRepayment // Full repayment
-        );
+        // Correctly calculate the final remaining debt
+        uint256 paidAmountSoFar = 0;
+        uint256 paidInstallmentsCount = 0;
+        for (uint i = 0; i < loanData.monthlyPayments.length; ++i) {
+            if (loanData.monthlyPayments[i]) {
+                paidInstallmentsCount++;
+            }
+        }
+        paidAmountSoFar = paidInstallmentsCount * monthlyPaymentForCrossChain; // USE CORRECT VARIABLE
+        uint256 remainingDebtToPay = totalDebt > paidAmountSoFar
+            ? totalDebt - paidAmountSoFar
+            : 0;
 
-        // Create token transfer data for final payment
-        uint256 remainingDebt = viewFacet(address(diamond))
-            .calculateTotalCurrentDebt(1);
-        Client.EVMTokenAmount[]
-            memory repayTokenAmounts = new Client.EVMTokenAmount[](1);
+        bytes memory repayData = abi.encode(uint256(1), PaymentType.FullRepayment);
+
+        Client.EVMTokenAmount[] memory repayTokenAmounts = new Client.EVMTokenAmount[](1);
         repayTokenAmounts[0] = Client.EVMTokenAmount({
             token: address(mockUSDC),
-            amount: remainingDebt
+            amount: remainingDebtToPay // USE CORRECT VARIABLE
         });
 
-        // Create CCIP message
         Client.Any2EVMMessage memory repayMessage = Client.Any2EVMMessage({
             messageId: bytes32(uint256(999)),
             sourceChainSelector: MUMBAI_CHAIN_SELECTOR,
@@ -856,34 +819,20 @@ contract DiamondE2ETest is Test {
             destTokenAmounts: repayTokenAmounts
         });
 
-        // Mint USDC to the router for the transfer
-        mockUSDC.mint(address(mockRouter), remainingDebt);
+        mockUSDC.mint(address(mockRouter), remainingDebtToPay); // USE CORRECT VARIABLE
 
         vm.stopPrank();
 
-        // Simulate CCIP message delivery for repayment
         vm.startPrank(address(mockRouter));
         CrossChainFacet(address(diamond)).ccipReceive(repayMessage);
         vm.stopPrank();
 
-        // Key fix: Have the diamond contract (the actual NFT owner) transfer the NFT
-        // This is a cleaner approach than having the admin try to do it
-        vm.prank(address(diamond));
-        AuthUser(address(diamond)).transferFrom(
-            address(diamond),
-            user1,
-            tokenId
-        );
-
-        // Verify NFT was returned
         assertEq(
             AuthUser(address(diamond)).ownerOf(tokenId),
             user1,
             "NFT should be returned to user"
         );
 
-        // Verify remaining buffer was refunded via CCIP
-        // This would typically send via CCIP back to user2 on Mumbai
         console.log(
             "Loan closed, remaining buffer should be returned via CCIP"
         );

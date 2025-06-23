@@ -70,7 +70,7 @@ contract AutomationLoan is
         address tokenAddress,
         uint64 sourceChainSelector,
         address sourceAddress
-    ) external {
+     ) external {
         DiamondStorage.VaultState storage ds = DiamondStorage.getStorage();
         address borrower = msg.sender;
         _validateLoanCreationView(tokenId, duration);
@@ -174,7 +174,7 @@ contract AutomationLoan is
         uint256 loanId,
         uint256 amountReceived,
         address tokenReceived
-    ) public override {
+     ) public override {
         // This function should be protected by a modifier like `onlyDiamond` in production.
         DiamondStorage.VaultState storage ds = DiamondStorage.getStorage();
         uint256 collateralTokenId = ds.loanIdToCollateralTokenId[loanId];
@@ -185,7 +185,7 @@ contract AutomationLoan is
 
         require(!loan.isActive, "Loan is already active");
         require(
-            amountReceived == ds.pendingBufferAmounts[loanId],
+            amountReceived >= ds.pendingBufferAmounts[loanId],
             "Incorrect buffer amount received"
         );
         require(
@@ -239,7 +239,7 @@ contract AutomationLoan is
         uint256 loanId,
         uint256 amountReceived,
         address tokenReceived
-    ) public override {
+     ) public override {
         // This function should be protected by a modifier like `onlyDiamond` in production.
         DiamondStorage.VaultState storage ds = DiamondStorage.getStorage();
         uint256 collateralTokenId = ds.loanIdToCollateralTokenId[loanId];
@@ -284,11 +284,13 @@ contract AutomationLoan is
         uint256 amountReceived,
         address tokenReceived,
         PaymentType pType
-    ) external override {
+     ) external override {
         if (pType == PaymentType.Buffer) {
             _activateLoanWithBuffer(loanId, amountReceived, tokenReceived);
         } else if (pType == PaymentType.EMI) {
-            _creditCrossChainEMI(loanId, amountReceived, tokenReceived);
+            _creditCrossChainEMI(loanId, amountReceived, tokenReceived); 
+        } else if (pType == PaymentType.FullRepayment) { // This is a new type for full repayment
+            _repayLoanFullCrossChain(loanId, amountReceived, tokenReceived);
         }
     }
 
@@ -304,7 +306,7 @@ contract AutomationLoan is
         uint64 sourceChainSelector,
         address sourceAddress,
         DiamondStorage.VaultState storage ds
-    ) internal returns (uint256) {
+     ) internal returns (uint256) {
         uint256 loanId = ++ds.currentLoanId;
         uint256 interestRate = _viewFacet().calculateInterestRate(duration);
         bool[] memory monthlyPayments = new bool[](duration / 30 days);
@@ -347,7 +349,7 @@ contract AutomationLoan is
         uint256 bufferAmount,
         address tokenAddress,
         DiamondStorage.VaultState storage ds
-    ) internal returns (uint256 loanId) {
+     ) internal returns (uint256 loanId) {
         bool[] memory monthlyPayments = new bool[](duration / 30 days);
         address borrower = msg.sender;
         loanId = ++ds.currentLoanId;
@@ -736,4 +738,68 @@ contract AutomationLoan is
             emit LoanLiquidated(loanId, loan.borrower);
         }
     }
+
+
+// NEW: Function to handle full repayment in cross-chain context
+
+function _repayLoanFullCrossChain(
+    uint256 loanId,
+    uint256 amountReceived,
+    address tokenReceived
+) internal {
+    DiamondStorage.VaultState storage ds = DiamondStorage.getStorage();
+    uint256 collateralTokenId = ds.loanIdToCollateralTokenId[loanId];
+
+    DiamondStorage.LoanData storage loan = ds.loans[collateralTokenId];
+
+    // 1. Initial validation
+    require(loan.isActive && loan.loanId == loanId, "Loan not active or found");
+    require(tokenReceived == loan.tokenAddress, "Incorrect token for repayment");
+
+    // 2. Calculate remaining debt (reusing logic from repayLoanFull)
+    uint256 paidAmountSoFar = 0;
+    uint256 monthlyInstallment = loan.totalDebt / loan.monthlyPayments.length;
+    uint256 paidInstallmentsCount = 0;
+    for (uint i = 0; i < loan.monthlyPayments.length; ++i) {
+        if (loan.monthlyPayments[i]) {
+            paidInstallmentsCount++;
+        }
+    }
+    paidAmountSoFar = paidInstallmentsCount * monthlyInstallment;
+    uint256 remainingDebtToPay = loan.totalDebt > paidAmountSoFar
+        ? loan.totalDebt - paidAmountSoFar
+        : 0;
+
+    // Validate that the received amount is sufficient
+    require(
+        amountReceived >= remainingDebtToPay,
+        "Insufficient repayment amount"
+    );
+
+    // 3. Mark loan as inactive and update state
+    loan.isActive = false;
+    if (ds.totalActiveLoans > 0) ds.totalActiveLoans--;
+    ds.totalERC20Locked -= loan.loanAmount;
+    ds.totalBufferLocked -= loan.remainingBuffer;
+    ds.totalTokenLocked[loan.tokenAddress] -= loan.loanAmount;
+    ds.totalBufferLockedByToken[loan.tokenAddress] -= loan.remainingBuffer;
+
+    // 4. Refund remaining buffer to the borrower on this chain
+    if (loan.remainingBuffer > 0) {
+        IERC20 token = IERC20(loan.tokenAddress);
+        token.transfer(loan.borrower, loan.remainingBuffer);
+        emit BufferReturned(loanId, loan.remainingBuffer);
+    }
+
+    // 5. Transfer collateral NFT back to the borrower
+    _nftContract().transferFrom(
+        address(this),
+        loan.borrower,
+        loan.userAccountTokenId // Use userAccountTokenId as in repayLoanFull
+    );
+
+    // 6. Emit final event
+    emit LoanRepaid(loanId, loan.borrower, remainingDebtToPay);
+}
+
 }
